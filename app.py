@@ -1,7 +1,6 @@
 import os
 import cv2
 import numpy as np
-import mediapipe as mp
 from tensorflow import keras
 from flask import Flask,request,jsonify,render_template,Response
 from keras.models import Sequential, load_model
@@ -22,17 +21,6 @@ labels=sorted(os.listdir(data_dir))
 app=Flask(__name__)
 app.config["upload_folder"]=upload_folder
 os.makedirs(upload_folder,exist_ok=True)
-
-mp_hands=mp.solutions.hands
-mp_drawing=mp.solutions.drawing_utils
-mp_drawing_styles= mp.solutions.drawing_styles
-
-hands_detector=mp.hands.Hands(
-    static_image_mode=False,
-    max_num_hands=1,
-    min_detection_confidence=0.5,
-    min_tracking_confidence=0.5
-)
 
 def build_and_train_model():
     global labels
@@ -81,22 +69,38 @@ def allowed_file(filename):
     return "." in filename and filename.rsplit(".",1)[1].lower() in allowed_extensions
 
 def detect_and_crop_hand(frame):
-    img_rgb=cv2.cvtColor(frame,cv2.COLOR_BGR2RGB)
-    results=hands_detector.process(img_rgb)
-    if not results.multi_hand_landmarks:
+    # Convert to HSV for skin detection
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+
+    # Skin color range (works decently under normal lighting)
+    lower_skin = np.array([0, 20, 70], dtype=np.uint8)
+    upper_skin = np.array([20, 255, 255], dtype=np.uint8)
+
+    # Create skin mask
+    mask = cv2.inRange(hsv, lower_skin, upper_skin)
+
+    # Noise removal
+    kernel = np.ones((3, 3), np.uint8)
+    mask = cv2.erode(mask, kernel, iterations=1)
+    mask = cv2.dilate(mask, kernel, iterations=2)
+    mask = cv2.GaussianBlur(mask, (5, 5), 0)
+
+    # Find contours
+    contours, _ = cv2.findContours(
+        mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+    )
+
+    if not contours:
         return None
-    
-    h,w,_=frame.shape
-    for hand_landmarks in results.multi_hand_landmarks:
-        x_coords= [lm.x*w for lm in hand_landmarks.landmark]
-        y_coords=[lm.y*h for lm in hand_landmarks.landmark]
-        x_min,x_max=int(min(x_coords))-20, int(max(x_coords))+20
-        y_min,y_max= int(min(y_coords))-20, int(max(y_coords))+20
-        x_min,y_min=max(0,x_min),max(0,y_min)
-        x_max,y_max=min(w,x_max),min(h,y_max)
-        cropped=frame[y_min:y_max,x_min:x_max]
-        return cropped
-    return None
+
+    # Largest contour assumed to be hand
+    cnt = max(contours, key=cv2.contourArea)
+    if cv2.contourArea(cnt) < 2000:
+        return None
+
+    x, y, w, h = cv2.boundingRect(cnt)
+    return frame[y:y+h, x:x+w]
+
 
 def preprocess_frame(frame):
     img=cv2.resize(frame,(img_size,img_size))
